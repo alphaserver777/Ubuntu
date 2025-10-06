@@ -1,0 +1,5 @@
+59 21 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null
+35 17  * * * /root/backup_and_push_rclone/run_backup_cron_script.sh >> /var/log/obsidian_backup.log 2>&1
+@reboot nohup python3 /home/ubuntu/Ubuntu/security/alert_ssh.py
+@reboot /etc/init.d/3proxy start
+
