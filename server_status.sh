@@ -7,12 +7,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Принудительная локаль для команд парсинга
+# Принудительная локаль
 export LC_ALL=C
 
-# --- Функции оформления ---
+# --- Функции ---
 print_header() {
     echo -e "\n${BOLD}${BLUE}=== $1 ===${NC}"
     echo -e "${BLUE}----------------------------------------${NC}"
@@ -22,170 +22,157 @@ print_info() {
     printf "${CYAN}%-25s${NC} : %s\n" "$1" "$2"
 }
 
-print_status() {
-    # $1 = Label, $2 = Value (yes/active), $3 = Desired state
-    local COLOR=$RED
-    if [[ "$2" == "$3" ]]; then COLOR=$GREEN; fi
-    printf "${CYAN}%-25s${NC} : ${COLOR}%s${NC}\n" "$1" "$2"
-}
-
+# Очистка экрана
 clear
 echo -e "${BOLD}${GREEN}"
-echo "   FULL SERVER DIAGNOSTIC   "
+echo "   ULTIMATE SERVER AUDIT   "
 echo -e "${NC}"
 date
 
 # ==============================================
-# 1. СИСТЕМА
+# 1. СИСТЕМА И РЕСУРСЫ
 # ==============================================
-print_header "1. СИСТЕМА"
+print_header "1. СИСТЕМА И ЗДОРОВЬЕ"
 HOSTNAME=$(hostname)
 OS=$(lsb_release -d 2>/dev/null | cut -f2 | xargs) || OS=$(cat /etc/*release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')
-KERNEL=$(uname -r)
 UPTIME=$(uptime -p | sed 's/up //')
+LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
 
 print_info "Hostname" "$HOSTNAME"
 print_info "OS" "$OS"
-print_info "Kernel" "$KERNEL"
 print_info "Uptime" "$UPTIME"
+print_info "Load Average" "$LOAD"
+
+# Проверка OOM (Out of Memory) убийств в логах
+OOM_CHECK=$(grep -i "killed process" /var/log/syslog 2>/dev/null | tail -n 1)
+if [ -n "$OOM_CHECK" ]; then
+    echo -e "${RED}WARNING: OOM Killer detected recently!${NC}"
+    echo "Last kill: $OOM_CHECK"
+else
+    print_info "OOM Killer Status" "${GREEN}No recent kills detected${NC}"
+fi
+
+# Проверка упавших сервисов
+FAILED_SERVICES=$(systemctl list-units --state=failed --no-legend --plain)
+if [ -n "$FAILED_SERVICES" ]; then
+    echo -e "${RED}FAILED SYSTEMD SERVICES:${NC}"
+    echo "$FAILED_SERVICES"
+else
+    print_info "System Services" "${GREEN}All services healthy${NC}"
+fi
 
 # ==============================================
-# 2. РЕСУРСЫ (CPU/RAM/DISK)
+# 2. ПАМЯТЬ И ДИСКИ
 # ==============================================
-print_header "2. РЕСУРСЫ"
-# CPU
-CPU_MODEL=$(lscpu | grep "Model name" | cut -d ':' -f2 | xargs)
-CPU_CORES=$(nproc)
-LOAD_AVG=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
-print_info "CPU Model" "$CPU_MODEL"
-print_info "Cores / Load" "$CPU_CORES cores / [$LOAD_AVG]"
-
+print_header "2. ПАМЯТЬ И ДИСК"
 # RAM
 FREE_DATA=$(free -m | grep "Mem:")
 MEM_TOTAL=$(echo "$FREE_DATA" | awk '{print $2}')
 MEM_USED=$(echo "$FREE_DATA" | awk '{print $3}')
-if [[ -z "$MEM_TOTAL" || "$MEM_TOTAL" -eq 0 ]]; then MEM_TOTAL=1; MEM_USED=0; fi
+[ -z "$MEM_TOTAL" ] && MEM_TOTAL=1
 MEM_PERC=$(awk "BEGIN {printf \"%.0f\", ($MEM_USED/$MEM_TOTAL)*100}")
 
-# Цвет RAM
-if [ "$MEM_PERC" -ge 80 ]; then M_COL=$RED; elif [ "$MEM_PERC" -ge 50 ]; then M_COL=$YELLOW; else M_COL=$GREEN; fi
+if [ "$MEM_PERC" -ge 85 ]; then M_COL=$RED; elif [ "$MEM_PERC" -ge 50 ]; then M_COL=$YELLOW; else M_COL=$GREEN; fi
 printf "${CYAN}%-25s${NC} : ${M_COL}%s%%${NC} (%sMB / %sMB)\n" "RAM Usage" "$MEM_PERC" "$MEM_USED" "$MEM_TOTAL"
 
-# DISK (Root)
-DISK_ usage=$(df -h / | tail -1 | awk '{print $5, $3, $2}')
-DISK_PERC=$(echo $DISK_usage | awk '{print $1}')
-DISK_DET=$(echo $DISK_usage | awk '{print $2 " / " $3}')
-printf "${CYAN}%-25s${NC} : %s (%s)\n" "Disk (Root)" "$DISK_PERC" "$DISK_DET"
+# DISK
+df -hP | grep -vE '^Filesystem|tmpfs|cdrom|loop|udev' | awk '{printf "%-25s : %s / %s (%s)\n", $6, $3, $2, $5}'
 
 # ==============================================
-# 3. ПОЛЬЗОВАТЕЛИ
+# 3. СЕТЬ И БЕЗОПАСНОСТЬ
 # ==============================================
-print_header "3. ПОЛЬЗОВАТЕЛИ"
+print_header "3. СЕТЬ И FIREWALL"
 
-# Активные пользователи (онлайн)
-CURRENT_USERS=$(who | awk '{print $1}' | sort | uniq | xargs)
-if [ -z "$CURRENT_USERS" ]; then CURRENT_USERS="None"; fi
-print_info "Currently Online" "$CURRENT_USERS"
-
-# Пользователи с доступом к Shell (исключая системные nologin/false)
-# Ищем в /etc/passwd тех, у кого shell заканчивается на sh (bash, zsh, sh)
-echo -e "${BOLD}Users with Shell Access:${NC}"
-grep -E '/(bash|zsh|sh)$' /etc/passwd | cut -d: -f1 | column -x
-echo ""
-
-# ==============================================
-# 4. SSH И БЕЗОПАСНОСТЬ
-# ==============================================
-print_header "4. SSH КОНФИГУРАЦИЯ"
-
-# Статус сервиса
-SSH_STATUS=$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null)
-if [ "$SSH_STATUS" == "active" ]; then 
-    printf "${CYAN}%-25s${NC} : ${GREEN}ACTIVE (Running)${NC}\n" "SSH Service"
-else
-    printf "${CYAN}%-25s${NC} : ${RED}INACTIVE/STOPPED${NC}\n" "SSH Service"
-fi
-
-# Читаем конфиг (пытаемся найти основные параметры)
-SSH_CONF="/etc/ssh/sshd_config"
-
-if [ -r "$SSH_CONF" ]; then
-    # Порт
-    SSH_PORT=$(grep -E "^Port " $SSH_CONF | awk '{print $2}')
-    [ -z "$SSH_PORT" ] && SSH_PORT="22 (Default)"
-    
-    # Root Login
-    ROOT_LOGIN=$(grep -E "^PermitRootLogin " $SSH_CONF | awk '{print $2}')
-    [ -z "$ROOT_LOGIN" ] && ROOT_LOGIN="prohibit-password (Default)"
-
-    # Password Auth
-    PASS_AUTH=$(grep -E "^PasswordAuthentication " $SSH_CONF | awk '{print $2}')
-    [ -z "$PASS_AUTH" ] && PASS_AUTH="yes (Default)"
-
-    # PubKey Auth
-    KEY_AUTH=$(grep -E "^PubkeyAuthentication " $SSH_CONF | awk '{print $2}')
-    [ -z "$KEY_AUTH" ] && KEY_AUTH="yes (Default)"
-
-    print_info "SSH Port" "$SSH_PORT"
-    
-    # Логика цветов для безопасности
-    # Root login лучше выключать или prohibit-password
-    if [[ "$ROOT_LOGIN" == "no" || "$ROOT_LOGIN" == "prohibit-password" ]]; then RL_COL=$GREEN; else RL_COL=$RED; fi
-    printf "${CYAN}%-25s${NC} : ${RL_COL}%s${NC}\n" "Permit Root Login" "$ROOT_LOGIN"
-
-    # Вход по паролю (безопаснее выключать, если есть ключи)
-    if [[ "$PASS_AUTH" == "no" ]]; then PA_COL=$GREEN; else PA_COL=$YELLOW; fi
-    printf "${CYAN}%-25s${NC} : ${PA_COL}%s${NC} (no is safer)\n" "Password Auth" "$PASS_AUTH"
-
-    # Вход по ключу
-    if [[ "$KEY_AUTH" == "yes" ]]; then KA_COL=$GREEN; else KA_COL=$RED; fi
-    printf "${CYAN}%-25s${NC} : ${KA_COL}%s${NC}\n" "Public Key Auth" "$KEY_AUTH"
-
-else
-    echo -e "${RED}Cannot read $SSH_CONF (Run as root/sudo to see details)${NC}"
-fi
-
-# ==============================================
-# 5. УСТАНОВЛЕННОЕ ПО (User Installed)
-# ==============================================
-print_header "5. ПРОГРАММЫ (Manual Install)"
-
-# Проверяем apt-mark
-if command -v apt-mark &> /dev/null; then
-    echo -e "${YELLOW}APT Packages (Manually installed, top 30):${NC}"
-    # Показываем только установленные вручную, сортируем, ограничиваем
-    apt-mark showmanual | sort | head -n 30 | column
-    
-    TOTAL_APT=$(apt-mark showmanual | wc -l)
-    if [ "$TOTAL_APT" -gt 30 ]; then
-        echo -e "... and $(($TOTAL_APT - 30)) more packages."
-    fi
-else
-    echo "apt-mark not found (non-Debian system?)"
-fi
-
-echo ""
-
-# Проверяем Snap
-if command -v snap &> /dev/null; then
-    echo -e "${YELLOW}SNAP Packages:${NC}"
-    snap list | awk 'NR>1 {print $1 " (" $2 ")"}' | column
-else
-    echo "Snap not installed or active."
-fi
-
-# ==============================================
-# 6. СЕТЬ
-# ==============================================
-print_header "6. СЕТЬ"
-ip -4 addr | grep inet | grep -v "127.0.0.1" | awk '{print $2 " on " $NF}' | while read line; do
-   print_info "Interface" "$line"
+# IP
+ip -4 addr | grep inet | grep -v "127.0.0.1" | awk '{print $2 " (" $NF ")"}' | while read line; do
+   print_info "Internal IP" "$line"
 done
 
+# Внешний IP
+if command -v curl &> /dev/null; then
+    EXT_IP=$(curl -s --connect-timeout 2 ifconfig.me)
+    [ ! -z "$EXT_IP" ] && print_info "External IP" "$EXT_IP"
+fi
+
+echo ""
+# UFW Status
+if command -v ufw &> /dev/null; then
+    UFW_STATUS=$(sudo ufw status | grep "Status" | awk '{print $2}')
+    if [ "$UFW_STATUS" == "active" ]; then
+        print_info "Firewall (UFW)" "${GREEN}ACTIVE${NC}"
+        echo -e "${BOLD}Open Rules:${NC}"
+        sudo ufw status numbered | head -n 10
+    else
+        print_info "Firewall (UFW)" "${RED}INACTIVE${NC}"
+    fi
+else
+    print_info "Firewall" "UFW not installed"
+fi
+
 # ==============================================
-# 7. TOP ПРОЦЕССЫ
+# 4. ОТКРЫТЫЕ ПОРТЫ
 # ==============================================
-print_header "7. TOP RAM USERS"
-ps -eo user,comm,%mem --sort=-%mem | head -n 6 | awk 'NR==1 {print $0} NR>1 {print $0}' | column -t
+print_header "4. СЛУШАЮЩИЕ ПОРТЫ (Listening)"
+# Показывает TCP порты, которые слушает сервер
+if command -v ss &> /dev/null; then
+    echo -e "${BOLD}Port  Process${NC}"
+    sudo ss -tulnp | grep LISTEN | awk '{print $5, $7}' | sed 's/users:(("//g' | sed 's/".*//g' | sort -u | column -t
+else
+    echo "ss command not found"
+fi
+
+# ==============================================
+# 5. SSH КОНФИГУРАЦИЯ
+# ==============================================
+print_header "5. SSH AUDIT"
+SSH_CONF="/etc/ssh/sshd_config"
+if [ -r "$SSH_CONF" ]; then
+    PORT=$(grep -E "^Port " $SSH_CONF | awk '{print $2}')
+    ROOT=$(grep -E "^PermitRootLogin " $SSH_CONF | awk '{print $2}')
+    PASS=$(grep -E "^PasswordAuthentication " $SSH_CONF | awk '{print $2}')
+    
+    [ -z "$PORT" ] && PORT="22 (Default)"
+    [ -z "$ROOT" ] && ROOT="prohibit-password (Default)"
+    
+    print_info "SSH Port" "$PORT"
+    
+    if [[ "$ROOT" == "no" || "$ROOT" == "prohibit-password" ]]; then 
+        print_info "Root Login" "${GREEN}$ROOT${NC}"
+    else 
+        print_info "Root Login" "${RED}$ROOT${NC}"
+    fi
+
+    if [[ "$PASS" == "no" ]]; then 
+        print_info "Password Auth" "${GREEN}DISABLED (Secure)${NC}"
+    else 
+        print_info "Password Auth" "${YELLOW}ENABLED${NC}"
+    fi
+else
+    echo "Cannot read sshd_config (Run with sudo)"
+fi
+
+# ==============================================
+# 6. DOCKER (Если есть)
+# ==============================================
+if command -v docker &> /dev/null; then
+    print_header "6. DOCKER CONTAINERS"
+    if sudo docker info >/dev/null 2>&1; then
+        RUNNING=$(sudo docker ps -q | wc -l)
+        TOTAL=$(sudo docker ps -aq | wc -l)
+        print_info "Containers" "${GREEN}$RUNNING running${NC} / $TOTAL total"
+        if [ "$RUNNING" -gt 0 ]; then
+            echo -e "\n${BOLD}Running Containers:${NC}"
+            sudo docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" | awk 'NR>1 {print $0}' | head -n 5
+        fi
+    else
+        echo "Docker installed but daemon not accessible (permission denied?)"
+    fi
+fi
+
+# ==============================================
+# 7. ПОСЛЕДНЯЯ АКТИВНОСТЬ
+# ==============================================
+print_header "7. ПОСЛЕДНИЕ ВХОДЫ (Last 3)"
+last -n 3 -a | head -n 3 | awk '{printf "%-10s %-10s %-20s %s\n", $1, $2, $3, $NF}'
 
 echo -e "\n${BOLD}${GREEN}=== Готово ===${NC}\n"
