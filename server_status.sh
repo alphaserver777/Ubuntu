@@ -9,7 +9,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Принудительная локаль
+# Принудительная локаль (English) для корректного парсинга чисел
 export LC_ALL=C
 
 # --- Функции ---
@@ -25,40 +25,42 @@ print_info() {
 # Очистка экрана
 clear
 echo -e "${BOLD}${GREEN}"
-echo "   ULTIMATE SERVER AUDIT   "
+echo "   ULTIMATE SERVER AUDIT v3   "
 echo -e "${NC}"
 date
 
 # ==============================================
-# 1. СИСТЕМА И РЕСУРСЫ
+# 1. СИСТЕМА И CPU
 # ==============================================
-print_header "1. СИСТЕМА И ЗДОРОВЬЕ"
+print_header "1. СИСТЕМА И CPU"
 HOSTNAME=$(hostname)
 OS=$(lsb_release -d 2>/dev/null | cut -f2 | xargs) || OS=$(cat /etc/*release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')
 UPTIME=$(uptime -p | sed 's/up //')
-LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
+
+# --- ИСПРАВЛЕННЫЙ БЛОК CPU ---
+# Берем модель прямо из ядра (работает на всех Linux)
+CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | xargs)
+[ -z "$CPU_MODEL" ] && CPU_MODEL="Unknown / Virtual CPU"
+
+# Количество ядер
+CPU_CORES=$(nproc)
+# Загрузка
+LOAD_AVG=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
 
 print_info "Hostname" "$HOSTNAME"
 print_info "OS" "$OS"
 print_info "Uptime" "$UPTIME"
-print_info "Load Average" "$LOAD"
+echo "" 
+print_info "CPU Model" "$CPU_MODEL"
+print_info "Cores" "$CPU_CORES"
+print_info "Load Average" "$LOAD_AVG"
 
-# Проверка OOM (Out of Memory) убийств в логах
+# Проверка OOM (Out of Memory)
 OOM_CHECK=$(grep -i "killed process" /var/log/syslog 2>/dev/null | tail -n 1)
 if [ -n "$OOM_CHECK" ]; then
     echo -e "${RED}WARNING: OOM Killer detected recently!${NC}"
-    echo "Last kill: $OOM_CHECK"
 else
     print_info "OOM Killer Status" "${GREEN}No recent kills detected${NC}"
-fi
-
-# Проверка упавших сервисов
-FAILED_SERVICES=$(systemctl list-units --state=failed --no-legend --plain)
-if [ -n "$FAILED_SERVICES" ]; then
-    echo -e "${RED}FAILED SYSTEMD SERVICES:${NC}"
-    echo "$FAILED_SERVICES"
-else
-    print_info "System Services" "${GREEN}All services healthy${NC}"
 fi
 
 # ==============================================
@@ -100,8 +102,6 @@ if command -v ufw &> /dev/null; then
     UFW_STATUS=$(sudo ufw status | grep "Status" | awk '{print $2}')
     if [ "$UFW_STATUS" == "active" ]; then
         print_info "Firewall (UFW)" "${GREEN}ACTIVE${NC}"
-        echo -e "${BOLD}Open Rules:${NC}"
-        sudo ufw status numbered | head -n 10
     else
         print_info "Firewall (UFW)" "${RED}INACTIVE${NC}"
     fi
@@ -113,12 +113,9 @@ fi
 # 4. ОТКРЫТЫЕ ПОРТЫ
 # ==============================================
 print_header "4. СЛУШАЮЩИЕ ПОРТЫ (Listening)"
-# Показывает TCP порты, которые слушает сервер
 if command -v ss &> /dev/null; then
     echo -e "${BOLD}Port  Process${NC}"
     sudo ss -tulnp | grep LISTEN | awk '{print $5, $7}' | sed 's/users:(("//g' | sed 's/".*//g' | sort -u | column -t
-else
-    echo "ss command not found"
 fi
 
 # ==============================================
@@ -158,22 +155,19 @@ if command -v docker &> /dev/null; then
     print_header "6. DOCKER CONTAINERS"
     if sudo docker info >/dev/null 2>&1; then
         RUNNING=$(sudo docker ps -q | wc -l)
-        TOTAL=$(sudo docker ps -aq | wc -l)
-        print_info "Containers" "${GREEN}$RUNNING running${NC} / $TOTAL total"
+        print_info "Running Containers" "${GREEN}$RUNNING${NC}"
         if [ "$RUNNING" -gt 0 ]; then
-            echo -e "\n${BOLD}Running Containers:${NC}"
+            echo -e "\n${BOLD}Details:${NC}"
             sudo docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" | awk 'NR>1 {print $0}' | head -n 5
         fi
-    else
-        echo "Docker installed but daemon not accessible (permission denied?)"
     fi
 fi
 
 # ==============================================
-# 7. ПОСЛЕДНЯЯ АКТИВНОСТЬ
+# 7. ПОСЛЕДНЯЯ АКТИВНОСТЬ (ИСПРАВЛЕНО)
 # ==============================================
 print_header "7. ПОСЛЕДНИЕ ВХОДЫ (Last 3)"
-# $1=User, $2=TTY, $3-$6=Date/Time, $NF=IP (благодаря флагу -a)
+# Используем awk для гибкого форматирования даты и времени
 last -n 3 -a | head -n 3 | awk '{printf "%-10s %-10s %-4s %-4s %-3s %-6s %s\n", $1, $2, $3, $4, $5, $6, $NF}'
 
 echo -e "\n${BOLD}${GREEN}=== Готово ===${NC}\n"
