@@ -9,6 +9,7 @@ import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(SCRIPT_DIR, '.env')
+SERVICE_LOG_FILE = '/var/log/important/telegram-ssh-forwarder.log'
 LOG_FILES = [
     '/var/log/important/ssh-success.log',
     '/var/log/important/auth.log',
@@ -57,6 +58,18 @@ def load_env_file(path):
 
 def load_config():
     return load_env_file(ENV_FILE)
+
+
+def service_log(message, *, error=False):
+    ts = dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S%z')
+    level = 'ERROR' if error else 'INFO'
+    line = f'{ts} [{level}] {message}'
+    try:
+        with open(SERVICE_LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+    print(line, file=sys.stderr if error else sys.stdout, flush=True)
 
 
 def fmt_time(iso_ts):
@@ -125,9 +138,10 @@ def main():
     api_base = cfg.get('API_BASE', 'https://api.telegram.org')
 
     if not bot_token or not chat_id:
-        print('BOT_TOKEN/CHAT_ID not set in .env', file=sys.stderr)
+        service_log('BOT_TOKEN/CHAT_ID not set in .env', error=True)
         return 1
 
+    service_log(f'service started; watching files: {", ".join(LOG_FILES)}')
     cmd = ['tail', '-n', '0', '-F'] + LOG_FILES
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
@@ -140,11 +154,19 @@ def main():
             ev = parse_event(line)
             if not ev:
                 continue
+            service_log(
+                f'event matched status={ev["status"]} server={ev["server_name"]} '
+                f'user={ev["username"]} client_ip={ev["client_ip"]}'
+            )
             msg = format_message(ev)
             try:
                 send_telegram(bot_token, chat_id, api_base, msg)
+                service_log(
+                    f'telegram sent status={ev["status"]} server={ev["server_name"]} '
+                    f'user={ev["username"]} client_ip={ev["client_ip"]}'
+                )
             except Exception as e:
-                print(f'telegram send failed: {e}', file=sys.stderr)
+                service_log(f'telegram send failed: {e}', error=True)
     finally:
         proc.terminate()
     return 0
