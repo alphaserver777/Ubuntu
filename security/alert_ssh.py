@@ -1,160 +1,154 @@
+#!/usr/bin/env python3
+import datetime as dt
+import os
 import re
-import sys
 import subprocess
-import requests
-import logging
-from datetime import datetime
+import sys
+import urllib.parse
+import urllib.request
 
-# Конфигурация Telegram
-TELEGRAM_TOKEN = '7096335364:AAEhZiJzIeW3SZ3gkyj0wtgKX1ons6DM0uI'
-CHAT_ID = '1864831807'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(SCRIPT_DIR, '.env')
+LOG_FILES = [
+    '/var/log/important/ssh-success.log',
+    '/var/log/important/auth.log',
+]
 
-# Путь к лог-файлу SSH
-LOG_FILE = '/var/log/auth.log'
-LOG_FILENAME = '/var/log/ssh_monitor.log'
-
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
-class SSHEvent:
-    def __init__(self, time_str, username, client_ip, port, status, auth_type, details=""):
-        self.time = time_str.strip()
-        self.username = username.strip()
-        self.client_ip = client_ip.strip()
-        self.port = port.strip()
-        self.status = status.strip()
-        self.auth_type = auth_type.strip()
-        self.details = details.strip()
-
-    def __str__(self):
-        return (f"SSH Event:\n"
-                f"Time: {self.time}\n"
-                f"Username: {self.username}\n"
-                f"IP: {self.client_ip}\n"
-                f"Port: {self.port}\n"
-                f"Status: {self.status}\n"
-                f"Auth Type: {self.auth_type}\n"
-                f"Details: {self.details}\n")
+PATTERNS = [
+    {
+        'name': 'Accepted',
+        'emoji': '🔓',
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:\[\d+\])?:\s+Accepted\s+(?P<auth_type>\w+)\s+for\s+(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
+    },
+    {
+        'name': 'Failed',
+        'emoji': '❌',
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:\[\d+\])?:\s+Failed\s+password\s+for\s+(?:invalid user\s+)?(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
+    },
+    {
+        'name': 'SessionOpened',
+        'emoji': '🔓',
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+.*session opened for user (?P<username>\S+)')
+    },
+    {
+        'name': 'SessionClosed',
+        'emoji': '🚪',
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+.*session closed for user (?P<username>\S+)')
+    },
+]
 
 
-def send_telegram_message(event: SSHEvent):
-    emoji_map = {
-        "Accepted": "✅",
-        "Failed": "❌",
-        "Invalid": "⚠️",
-        "Closed": "🚪",
-        "Disconnected": "🔌",
-        "AuthFailure": "🔒",
-        "SessionOpened": "🔓",
-        "SessionClosed": "🚪",
-        "Error": "❗"
-    }
-    emoji = emoji_map.get(event.status, "⚠️")
-    
-    message = (f"{emoji} Новое событие SSH:\n"
-               f"⏰ Время: {event.time}\n"
-               f"🔑 Статус: {event.status}\n"
-               f"👨 User: {event.username}\n"
-               f"🌍 IP: {event.client_ip}\n"
-               f"🔒 Метод: {event.auth_type}\n"
-               f"🔌 Порт: {event.port}\n"
-               f"ℹ️ Подробности: {event.details}")
-    
+def load_env_file(path):
+    data = {}
     try:
-        response = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            params={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'},
-            timeout=10
-        )
-        if response.ok:
-            logging.info(f"✅ Уведомление успешно отправлено: {event.time} | {event.status}")
-        else:
-            logging.error(f"❌ Ошибка отправки уведомления: {response.status_code} - {response.text}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Ошибка соединения с Telegram: {str(e)}")
+        with open(path, 'r', encoding='utf-8') as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                if line.startswith('export '):
+                    line = line[len('export '):]
+                k, v = line.split('=', 1)
+                data[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return data
 
 
-def parse_ssh_line(line: str) -> SSHEvent or None:
-    line = line.strip().replace('\t', ' ').replace('  ', ' ')
-    
-    patterns = [
-        {  # Успешный вход
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* sshd\[\d+\]: Accepted (?P<auth_type>\w+) for (?P<username>\S+) from (?P<client_ip>\S+) port (?P<port>\d+)'),
-            'status': 'Accepted'
-        },
-        {  # Неудачный вход
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* sshd\[\d+\]: Failed password for (invalid user )?(?P<username>\S+) from (?P<client_ip>\S+) port (?P<port>\d+)'),
-            'status': 'Failed'
-        },
-        {  # Сессия открыта
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* pam_unix\(sshd:session\): session opened for user (?P<username>\S+)'),
-            'status': 'SessionOpened',
-            'auth_type': 'PAM'
-        },
-        {  # Сессия закрыта
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* pam_unix\(sshd:session\): session closed for user (?P<username>\S+)'),
-            'status': 'SessionClosed',
-            'auth_type': 'PAM'
-        },
-        {  # Новый сеанс systemd-logind
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* systemd-logind\[\d+\]: New session \d+ of user (?P<username>\S+)'),
-            'status': 'SessionOpened'
-        },
-        {  # Сессия закрыта systemd-logind
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* systemd-logind\[\d+\]: Session \d+ logged out. Waiting for processes to exit.'),
-            'status': 'SessionClosed'
-        },
-        {  # Отключение клиента
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* sshd\[\d+\]: Received disconnect from (?P<client_ip>\S+) port (?P<port>\d+):'),
-            'status': 'Disconnected'
-        },
-        {  # Ошибки SSH
-            'pattern': re.compile(r'(?P<time>\w+ \d+ \d+:\d+:\d+) .* sshd\[\d+\]: error: (?P<details>.+)'),
-            'status': 'Error'
+def load_config():
+    return load_env_file(ENV_FILE)
+
+
+def fmt_time(iso_ts):
+    try:
+        return dt.datetime.fromisoformat(iso_ts).strftime('%b %d %H:%M:%S')
+    except Exception:
+        return iso_ts
+
+
+def parse_event(line):
+    for p in PATTERNS:
+        m = p['regex'].search(line)
+        if not m:
+            continue
+        g = m.groupdict()
+        status = p['name']
+        auth_type = g.get('auth_type', 'N/A')
+        if status == 'Failed' and auth_type == 'N/A':
+            auth_type = 'password'
+        return {
+            'emoji': p['emoji'],
+            'time': fmt_time(g.get('ts', 'N/A')),
+            'status': status,
+            'server_name': g.get('server_name', 'N/A'),
+            'server_ip': g.get('server_ip', 'N/A'),
+            'username': g.get('username', 'N/A'),
+            'client_ip': g.get('client_ip', 'N/A'),
+            'auth_type': auth_type,
+            'port': g.get('port', 'N/A'),
+            'details': line,
         }
-    ]
-
-    for rule in patterns:
-        match = rule['pattern'].search(line)
-        if match:
-            groups = match.groupdict()
-            return SSHEvent(
-                time_str=groups['time'],
-                username=groups.get('username', 'N/A'),
-                client_ip=groups.get('client_ip', 'N/A'),
-                port=groups.get('port', 'N/A'),
-                status=rule['status'],
-                auth_type=rule.get('auth_type', 'N/A'),
-                details=line
-            )
-    
-    logging.warning(f"⚠️ Не распознана строка: {line}")
     return None
 
 
-def follow_log_file(log_file: str):
-    try:
-        logging.info(f"Начало отслеживания файла: {log_file}")
-        process = subprocess.Popen(['tail', '-n', '0', '-F', log_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        
-        for line in iter(process.stdout.readline, ''):
-            yield line.strip()
-    except KeyboardInterrupt:
-        process.terminate()
-        logging.info("Скрипт остановлен пользователем")
-        sys.exit(0)
-    except Exception as e:
-        logging.critical(f"Критическая ошибка: {str(e)}")
-        sys.exit(1)
+def format_message(ev):
+    return (
+        f"{ev['emoji']} Новое событие SSH:\n"
+        f"⏰ Время: {ev['time']}\n"
+        f"🖥️ Сервер: {ev['server_name']}\n"
+        f"📡 IP сервера: {ev['server_ip']}\n"
+        f"🔑 Статус: {ev['status']}\n"
+        f"👨 User: {ev['username']}\n"
+        f"🌍 IP: {ev['client_ip']}\n"
+        f"🔒 Метод: {ev['auth_type']}\n"
+        f"🔌 Порт: {ev['port']}\n"
+        f"ℹ️ Подробности: {ev['details']}"
+    )
+
+
+def send_telegram(bot_token, chat_id, api_base, text):
+    url = f"{api_base}/bot{bot_token}/sendMessage"
+    payload = urllib.parse.urlencode({
+        'chat_id': chat_id,
+        'text': text,
+        'disable_web_page_preview': 'true',
+    }).encode('utf-8')
+    req = urllib.request.Request(url, data=payload, method='POST')
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
 
 
 def main():
-    logging.info("🚀 Скрипт SSH Monitor запущен")
-    for line in follow_log_file(LOG_FILE):
-        event = parse_ssh_line(line)
-        if event:
-            logging.info(f"Обработано событие: {event.time} | {event.status}")
-            send_telegram_message(event)
+    cfg = load_config()
+    bot_token = cfg.get('BOT_TOKEN', '')
+    chat_id = cfg.get('CHAT_ID', '')
+    api_base = cfg.get('API_BASE', 'https://api.telegram.org')
 
-if __name__ == "__main__":
-    main()
+    if not bot_token or not chat_id:
+        print('BOT_TOKEN/CHAT_ID not set in .env', file=sys.stderr)
+        return 1
+
+    cmd = ['tail', '-n', '0', '-F'] + LOG_FILES
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line or line.startswith('==>'):
+                continue
+            ev = parse_event(line)
+            if not ev:
+                continue
+            msg = format_message(ev)
+            try:
+                send_telegram(bot_token, chat_id, api_base, msg)
+            except Exception as e:
+                print(f'telegram send failed: {e}', file=sys.stderr)
+    finally:
+        proc.terminate()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
