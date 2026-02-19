@@ -19,12 +19,12 @@ PATTERNS = [
     {
         'name': 'Accepted',
         'emoji': '🔓',
-        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:\[\d+\])?:\s+Accepted\s+(?P<auth_type>\w+)\s+for\s+(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:-session)?(?:\[\d+\])?:\s+Accepted\s+(?P<auth_type>\w+)\s+for\s+(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
     },
     {
         'name': 'Failed',
         'emoji': '❌',
-        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:\[\d+\])?:\s+Failed\s+password\s+for\s+(?:invalid user\s+)?(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
+        'regex': re.compile(r'^(?P<ts>\S+)\s+(?P<server_ip>\S+)\s+(?P<server_name>\S+)\s+sshd(?:-session)?(?:\[\d+\])?:\s+Failed\s+password\s+for\s+(?:invalid user\s+)?(?P<username>\S+)\s+from\s+(?P<client_ip>\S+)\s+port\s+(?P<port>\d+)')
     },
     {
         'name': 'SessionOpened',
